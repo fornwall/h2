@@ -81,6 +81,9 @@ pub struct Config {
 
     /// Connection-level budget policy for DATA framing overhead.
     pub(crate) data_frame_budget: DataFrameBudget,
+
+    /// Maximum number of empty, non-final DATA frames per connection.
+    pub max_recv_empty_data_frames: Option<usize>,
 }
 
 trait DebugStructExt<'a, 'b> {

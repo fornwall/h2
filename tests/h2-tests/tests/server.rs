@@ -26,6 +26,54 @@ async fn read_preface_in_multiple_frames() {
 }
 
 #[tokio::test]
+async fn server_configured_empty_data_frame_limit() {
+    h2_support::trace_init!();
+
+    for max in [Some(0), Some(1), Some(200), None] {
+        let (io, mut client) = mock::new();
+
+        let mock = async move {
+            let settings = client.assert_server_handshake().await;
+            assert_default_settings!(settings);
+            client
+                .send_frame(frames::headers(1).request("POST", "https://example.com/"))
+                .await;
+            for i in 0..max.unwrap_or(201) {
+                if i % 2 == 0 {
+                    client.send_frame(frames::data(1, [1, 0]).padded()).await;
+                } else {
+                    client.send_frame(frames::data(1, "")).await;
+                }
+            }
+            client.send_frame(frames::data(1, "hello")).await;
+            client.send_frame(frames::data(1, "").eos()).await;
+            client
+                .recv_frame(frames::headers(1).response(200).eos())
+                .await;
+        };
+
+        let h2 = async move {
+            let mut srv = server::Builder::new()
+                .max_recv_empty_data_frames(max)
+                .handshake::<_, Bytes>(io)
+                .await
+                .unwrap();
+            let (req, mut respond) = srv.next().await.unwrap().unwrap();
+            let request = async move {
+                assert_eq!(util::concat(req.into_body()).await.unwrap(), "hello");
+                respond.send_response(Response::new(()), true).unwrap();
+            };
+            let connection = async move {
+                assert!(srv.next().await.is_none());
+            };
+            join(request, connection).await;
+        };
+
+        join(mock, h2).await;
+    }
+}
+
+#[tokio::test]
 async fn server_builder_set_max_concurrent_streams() {
     h2_support::trace_init!();
     let (io, mut client) = mock::new();
