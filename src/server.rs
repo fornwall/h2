@@ -263,6 +263,9 @@ pub struct Builder {
     ///
     /// When this gets exhausted, we issue a GOAWAY with `ENHANCE_YOUR_CALM`.
     data_frame_budget: proto::DataFrameBudget,
+
+    /// Maximum number of empty, non-final DATA frames per connection.
+    max_recv_empty_data_frames: Option<usize>,
 }
 
 /// Send a response back to the client
@@ -663,6 +666,7 @@ impl Builder {
             max_send_buffer_size: proto::DEFAULT_MAX_SEND_BUFFER_SIZE,
             local_max_error_reset_streams: Some(proto::DEFAULT_LOCAL_RESET_COUNT_MAX),
             data_frame_budget: proto::DataFrameBudget::Auto,
+            max_recv_empty_data_frames: Some(proto::DEFAULT_MAX_RECV_EMPTY_DATA_FRAMES),
         }
     }
 
@@ -1046,6 +1050,18 @@ impl Builder {
         self
     }
 
+    /// Sets the maximum number of empty, non-final DATA frames received over
+    /// the lifetime of a connection. Padding does not count as payload.
+    ///
+    /// Exceeding this limit closes the connection with `ENHANCE_YOUR_CALM`.
+    /// The default is currently 100, but could change. `Some(0)` rejects every
+    /// empty, non-final DATA frame. `None` disables this protection against
+    /// empty DATA frame floods, for peers that require such frames.
+    pub fn max_recv_empty_data_frames(&mut self, max: Option<usize>) -> &mut Self {
+        self.max_recv_empty_data_frames = max;
+        self
+    }
+
     /// Sets a connection-level budget for limiting memory overhead from
     /// received small DATA frames.
     ///
@@ -1056,7 +1072,8 @@ impl Builder {
     /// Small DATA frames consume this budget. The budget is restored when
     /// buffered frames are consumed by the application, while sufficiently
     /// large frames may also restore budget. Empty DATA frames are limited
-    /// separately and do not consume this budget.
+    /// separately by [`Self::max_recv_empty_data_frames`] and do not consume
+    /// this budget.
     ///
     /// When this budget is exhausted, the connection is closed with
     /// `ENHANCE_YOUR_CALM`.
@@ -1535,6 +1552,7 @@ where
                                 .local_max_error_reset_streams,
                             settings: self.builder.settings.clone(),
                             data_frame_budget: self.builder.data_frame_budget,
+                            max_recv_empty_data_frames: self.builder.max_recv_empty_data_frames,
                         },
                     );
 

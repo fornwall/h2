@@ -83,6 +83,9 @@ pub(super) struct Counts {
     /// Whether the DATA frame budget follows the target connection window.
     data_frame_budget_is_auto: bool,
 
+    /// Maximum number of empty, non-final DATA frames per connection.
+    max_recv_empty_data_frames: Option<usize>,
+
     /// Number of empty, non-final DATA frames received over the lifetime of
     /// the connection.
     num_recv_empty_data_frames: usize,
@@ -105,6 +108,7 @@ impl Counts {
             num_local_error_reset_streams: 0,
             data_frame_budget: Budget::new(config.data_frame_budget.resolve(None)),
             data_frame_budget_is_auto: config.data_frame_budget.is_auto(),
+            max_recv_empty_data_frames: config.max_recv_empty_data_frames,
             num_recv_empty_data_frames: 0,
         }
     }
@@ -119,12 +123,11 @@ impl Counts {
     /// Records the framing overhead of a DATA frame.
     pub fn record_data_frame(&mut self, payload_len: usize) -> Result<(), BudgetExhausted> {
         if payload_len == 0 {
-            self.num_recv_empty_data_frames = self
-                .num_recv_empty_data_frames
-                .checked_add(1)
-                .ok_or(BudgetExhausted)?;
-            if self.num_recv_empty_data_frames > MAX_RECV_EMPTY_DATA_FRAMES {
-                return Err(BudgetExhausted);
+            if let Some(max) = self.max_recv_empty_data_frames {
+                if self.num_recv_empty_data_frames >= max {
+                    return Err(BudgetExhausted);
+                }
+                self.num_recv_empty_data_frames += 1;
             }
             Ok(())
         } else if payload_len < DEFAULT_DATA_FRAME_OVERHEAD_THRESHOLD {
@@ -390,6 +393,7 @@ mod tests {
             remote_max_initiated: None,
             local_max_error_reset_streams: None,
             data_frame_budget: DataFrameBudget::Configured(DEFAULT_DATA_FRAME_BUDGET),
+            max_recv_empty_data_frames: Some(DEFAULT_MAX_RECV_EMPTY_DATA_FRAMES),
         }
     }
 
@@ -483,7 +487,7 @@ mod tests {
         let mut counts = counts();
         counts.data_frame_budget = Budget::new(0);
 
-        for _ in 0..MAX_RECV_EMPTY_DATA_FRAMES {
+        for _ in 0..DEFAULT_MAX_RECV_EMPTY_DATA_FRAMES {
             counts.record_data_frame(0).unwrap();
         }
 
@@ -494,10 +498,43 @@ mod tests {
     }
 
     #[test]
+    fn configured_empty_data_frame_limit() {
+        for max in [0, 1, 200] {
+            let mut counts = Counts::new(
+                peer::Dyn::Server,
+                &Config {
+                    max_recv_empty_data_frames: Some(max),
+                    ..counts_config()
+                },
+            );
+            for _ in 0..max {
+                counts.record_data_frame(0).unwrap();
+            }
+            assert!(counts.record_data_frame(0).is_err());
+        }
+    }
+
+    #[test]
+    fn disabled_empty_data_frame_limit_preserves_data_frame_budget() {
+        let mut counts = Counts::new(
+            peer::Dyn::Server,
+            &Config {
+                max_recv_empty_data_frames: None,
+                data_frame_budget: DataFrameBudget::Configured(0),
+                ..counts_config()
+            },
+        );
+        for _ in 0..1_000 {
+            counts.record_data_frame(0).unwrap();
+        }
+        assert!(counts.record_data_frame(1).is_err());
+    }
+
+    #[test]
     fn large_data_frames_do_not_replenish_empty_data_frame_limit() {
         let mut counts = counts();
 
-        for _ in 0..MAX_RECV_EMPTY_DATA_FRAMES {
+        for _ in 0..DEFAULT_MAX_RECV_EMPTY_DATA_FRAMES {
             counts.record_data_frame(0).unwrap();
             counts
                 .record_data_frame(DEFAULT_DATA_FRAME_OVERHEAD_THRESHOLD * 2)

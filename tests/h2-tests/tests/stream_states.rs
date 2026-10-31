@@ -147,6 +147,56 @@ async fn recv_ignores_empty_data_without_end_stream() {
 }
 
 #[tokio::test]
+async fn client_configured_empty_data_frame_limit() {
+    h2_support::trace_init!();
+
+    for max in [Some(0), Some(1), Some(200), None] {
+        let (io, mut srv) = mock::new();
+
+        let mock = async move {
+            let settings = srv.assert_client_handshake().await;
+            assert_default_settings!(settings);
+            srv.recv_frame(
+                frames::headers(1)
+                    .request("GET", "https://example.com/")
+                    .eos(),
+            )
+            .await;
+            srv.send_frame(frames::headers(1).response(200)).await;
+            for i in 0..max.unwrap_or(201) {
+                if i % 2 == 0 {
+                    srv.send_frame(frames::data(1, [1, 0]).padded()).await;
+                } else {
+                    srv.send_frame(frames::data(1, "")).await;
+                }
+            }
+            srv.send_frame(frames::data(1, "hello")).await;
+            srv.send_frame(frames::data(1, "").eos()).await;
+        };
+
+        let h2 = async move {
+            let (mut client, mut h2) = client::Builder::new()
+                .max_recv_empty_data_frames(max)
+                .handshake::<_, Bytes>(io)
+                .await
+                .unwrap();
+            let request = Request::builder()
+                .uri("https://example.com/")
+                .body(())
+                .unwrap();
+            let response = client.send_request(request, true).unwrap().0;
+            let response = h2.run(response).await.unwrap();
+            let body = h2.drive(util::concat(response.into_body())).await.unwrap();
+            assert_eq!(body, "hello");
+            drop(client);
+            h2.await.unwrap();
+        };
+
+        join(mock, h2).await;
+    }
+}
+
+#[tokio::test]
 async fn too_many_empty_data_frames_sends_goaway() {
     h2_support::trace_init!();
 
